@@ -1,0 +1,19 @@
+# Generated data / logs -- don't commit these, they're huge and machine-specific
+*.h5
+*.log
+*.log.1
+*.rescue_*.csv
+Histograms/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+.vscode/
+
+# R
+.Rhistory

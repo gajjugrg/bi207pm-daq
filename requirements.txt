@@ -1,0 +1,6 @@
+# Scope PC is typically Windows 7 or Windows 11.
+# Python 3.8 is the last version with official installers for Windows 7 --
+# use it there. Windows 11 can use a newer Python 3.x.
+pywin32
+h5py
+numpy
