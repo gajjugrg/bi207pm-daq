@@ -46,6 +46,13 @@ File-level attributes (`hf.attrs`):
 | `<F>/n_bins` | `(N,)` | `int32` | Length of the scope's `BinPopulations` that row |
 | `<F>/counts` | `(N, nBins)` | `uint64` | Full-axis bin populations, zero outside `[first_bin, last_bin]` |
 
+Group attributes, written the first time a function is available:
+
+- `description` — what the math function computes (its equation, or `operator(source)`), from `show_mapping.py` / `describe_function`. Empty and omitted when the scope does not report it.
+- `units` — axis units of the histogram (`s`, `V`, ...), omitted when unknown.
+
+`srcs/lecroy_hist.py` reads both of these back onto the snapshot.
+
 **Always mask on `available`.** A row exists for every snapshot attempt, and
 a function that was unavailable — or a snapshot interrupted partway through
 its append, e.g. by a `taskkill` — leaves a row of zeros behind. Those rows
@@ -76,7 +83,17 @@ not just reading them):
 
 ## Reading it back
 
-Any `h5py` script works directly against these paths, e.g.:
+`srcs/lecroy_hist.py` is the reader. It accepts the v1 and v2 text files
+(including `.csv.gz` from the old VBScript logger and `.rescue_*.csv` from
+this one), and the HDF5 files this logger appends to:
+
+```bash
+python srcs/lecroy_hist.py info   2026_Sep_11.h5
+python srcs/lecroy_hist.py verify 2026_Sep_11.h5          # exit 1 on any problem
+python srcs/lecroy_hist.py pack   Record_*.csv.gz -o 2026_Sep.h5
+```
+
+Any `h5py` script works directly against these paths as well, e.g.:
 
 ```python
 import h5py

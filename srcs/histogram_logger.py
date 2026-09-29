@@ -9,8 +9,10 @@ an HDF5 file instead of becoming its own text file:
     FILE_PERIOD = "day"    ->  C:\\Histograms\\2026_Sep\\2026_Sep_06.h5   (24 rows)
     FILE_PERIOD = "month"  ->  C:\\Histograms\\2026_Sep.h5              (~720 rows)
 
-The file layout is the one lecroy_hist.pack_hdf5() writes, so lecroy_hist.py
-(hdf5_histogram, to_th1) reads both:
+The file layout matches srcs/lecroy_hist.py (pack_hdf5, hdf5_histogram, to_th1),
+which reads these files back. The VBScript this replaces is
+legacy/histogram_logger.vbs, and srcs/show_mapping.py prints which parameter
+each function histograms before a run. Layout:
 
     /timestamp        (N,)         "YYYY-MM-DDTHH:MM:SS"  (end of the accumulation)
     /duration_s       (N,)         float64, seconds accumulated (clear -> start of readout)
@@ -141,8 +143,8 @@ def clear_sweeps() -> str:
     ClearSweeps() raises DISP_E_MEMBERNOTFOUND. Verified once at startup by checking
     that the histogram population actually drops: on this scope
     app.Acquisition.ClearSweeps.ActNow() returned cleanly while clearing nothing,
-    so "did not raise" is not proof that it worked.
-    Run probe_scope.py if the scope firmware changes and this stops working.
+    so "did not raise" is not proof that it worked. If the firmware changes and
+    this warning comes back, the clear is not doing what the log claims.
     """
     global _verified
     before = None if _verified else _sweep_count()
@@ -170,6 +172,60 @@ def num(x) -> float:
         return float(x)
     m = _NUM.search(str(x))
     return float(m.group()) if m else 0.0
+
+
+def _com_str(obj, attr: str) -> str:
+    """str() of obj.attr, or "" if this firmware has no such property.
+
+    Most XStream properties are control objects wrapping the value rather than
+    the value itself, hence the .Value unwrap.
+    """
+    try:
+        value = getattr(obj, attr)
+        value = getattr(value, "Value", value)
+        text = str(value).strip()
+    except Exception:  # noqa: BLE001 - absent properties are the normal case here
+        return ""
+    return "" if text.lower() in ("", "none", "undefined") else text
+
+
+_descriptions = {}
+
+
+def describe_function(name: str) -> str:
+    """What math function `name` computes, as a short human string ("" if unknown).
+
+    Which property holds this depends on the firmware, so try the known ones in
+    turn and settle for "" rather than guessing. Recorded into the HDF5 file so
+    that data read back months later still says which parameter it came from,
+    and printed by show_mapping.py. Cached: it only changes when someone
+    reconfigures the scope, and it is otherwise one COM traversal per snapshot.
+    """
+    if name in _descriptions:
+        return _descriptions[name]
+    text = ""
+    try:
+        f = scope.Math.Functions(name)
+        equation = _com_str(f, "Equation")
+        if equation:
+            text = equation
+        else:
+            operator = _com_str(f, "Operator1Name") or _com_str(f, "ProcessorName")
+            source = _com_str(f, "Source1")
+            text = f"{operator}({source})" if operator and source else operator
+    except Exception:  # noqa: BLE001 - never worth failing a snapshot over
+        pass
+    _descriptions[name] = text
+    return text
+
+
+def axis_units(h) -> str:
+    """Units of the quantity a histogram result is binning ("" if the scope is silent)."""
+    for attr in ("HorizontalUnits", "HorUnits", "XAxisUnits"):
+        units = _com_str(h, attr)
+        if units:
+            return units
+    return ""
 
 
 def poll_histogram(name):
@@ -243,7 +299,8 @@ def _read_histogram(name):
     width, offset = num(h.BinWidth), num(h.OffsetAtLeftEdge)
     if width == 0 or last < first:          # last == first is a single populated bin, which is valid
         return None
-    return dict(width=width, offset=offset, first=first, last=last, counts=counts)
+    return dict(width=width, offset=offset, first=first, last=last, counts=counts,
+                units=axis_units(h))
 
 
 # ---------------- file naming ----------------
@@ -318,6 +375,12 @@ def append_snapshot(path: str, timestamp: str, results: dict,
                 g.create_dataset("counts", shape=(i, n_bins), maxshape=(None, None), dtype="uint64",
                                  chunks=(1, n_bins), compression="gzip", compression_opts=GZIP_LEVEL,
                                  shuffle=True, fletcher32=True, fillvalue=0)
+                # what this function was measuring, so the file is still self-describing
+                # months later; lecroy_hist.hdf5_snapshots carries these on the Snapshot
+                for key, value in (("description", describe_function(name)),
+                                   ("units", r.get("units", ""))):
+                    if value:
+                        g.attrs[key] = value
             ds = g["counts"]
             if n_bins > ds.shape[1]:                      # scope histogram was given more bins
                 ds.resize(n_bins, axis=1)
