@@ -1,6 +1,13 @@
-# Scope PC is typically Windows 7 or Windows 11.
-# Python 3.8 is the last version with official installers for Windows 7 --
-# use it there. Windows 11 can use a newer Python 3.x.
-pywin32
-h5py
-numpy
+# Windows 11 scope PCs, on Python 3.10-3.13.
+#
+# Windows 7 PCs are stuck on Python 3.8 (the last version with an official
+# installer for it) and need requirements-py38.txt instead -- none of the
+# versions below ship a cp38 wheel.
+#
+# Pinned on purpose. This is instrument DAQ code deployed by hand to several
+# scope PCs; unpinned dependencies mean no two of them are provably running the
+# same thing, and nothing records which combination was validated against a
+# scope. Bump deliberately, then re-run the tests.
+pywin32==306
+h5py==3.12.1
+numpy==2.1.3

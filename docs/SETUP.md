@@ -17,12 +17,24 @@ the scope over a local COM/ActiveX connection
 
 ## 2. Install dependencies
 
+On a Windows 11 PC (Python 3.10–3.13):
+
 ```powershell
 pip install -r requirements.txt
 ```
 
-This installs `pywin32` (COM access to the scope app), `h5py` (HDF5 writer),
-and `numpy`.
+On a Windows 7 PC (Python 3.8):
+
+```powershell
+pip install -r requirements-py38.txt
+```
+
+Both install `pywin32` (COM access to the scope app), `h5py` (HDF5 writer),
+and `numpy`, at pinned versions. The split exists because Python 3.8 is the
+last release with a Windows 7 installer, and the current `h5py` and `numpy`
+no longer publish cp38 wheels. The versions are pinned so that every scope
+PC is provably running the same thing — bump them deliberately and re-run
+the tests, rather than letting each machine resolve its own.
 
 `pywin32` needs its post-install step run once per machine:
 
@@ -48,9 +60,22 @@ separate config file:
 | `GZIP_LEVEL` | HDF5 gzip compression level for histogram counts | `6` |
 | `LOG_FILE` | Where status lines get appended | `C:\Histograms\logger.log` |
 | `MAX_LOG_MB` | Log gets rolled to `<name>.1` past this size | `5` |
+| `CONNECT_RETRIES` | Startup only: how many times to retry attaching to the scope app, for when the logger is launched at boot and wins the race against it | `6` |
+| `CONNECT_RETRY_S` | Seconds between those startup attempts | `10` |
+| `RECONNECT_AFTER_DEAD_CYCLES` | Consecutive snapshots with *no* function available before the logger decides the COM link is stale and reattaches | `3` |
 
 Edit these directly in the script before a run. Add `"F6"`, `"F7"`, `"F8"` to
 `FUNC_NAMES` if you have more histogram functions configured on the scope.
+
+Before the first run, from the `srcs` folder on the scope PC:
+
+```powershell
+py show_mapping.py
+```
+
+That prints one line per function — the equation or `operator(source)`, and
+the axis units — so you can confirm F1 really is the channel you think it is.
+The same strings are written into each HDF5 file as group attributes.
 
 ## 4. Sanity-check the scope link once
 
@@ -64,7 +89,21 @@ WARNING: sweeps did not drop (... -> ...) - the histograms may not be
 resetting, so snapshots would accumulate.
 ```
 
-stop and check the scope firmware / COM binding before trusting a run. This
-check only runs once per process start.
+stop and check the scope firmware / COM binding before trusting a run. The
+check runs once per connection — at startup, and again after any mid-run
+reconnect, since a fresh COM object may be a different application instance.
+
+## 5. Run the tests (optional, and not on the scope PC)
+
+`tests/` covers everything below the COM boundary against a stub scope, so
+it runs on any machine with `h5py` and `numpy` and needs neither Windows nor
+an instrument:
+
+```bash
+python -m unittest discover -s tests
+```
+
+Worth running after any edit to the storage or recovery logic — that code
+is otherwise only exercised on a scope PC that is busy taking data.
 
 Next: `RUNNING.md` for how to actually start and monitor a run.

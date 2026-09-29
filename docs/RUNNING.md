@@ -119,21 +119,38 @@ log. Only one rolled generation is kept — anything older is discarded.
 
 - **A single HDF5 append fails** (disk full, file locked, etc.): that one
   snapshot is written instead as `<name>.rescue_HHMM.csv` next to the `.h5`
-  file, in the old text format, and the loop continues. Nothing is silently
-  lost — check for stray `.rescue_*.csv` files after a run and fold them in
-  by hand if needed.
+  file, in the old text format, and the loop continues. If that folder is
+  the problem — a new month folder that cannot be created, a permissions
+  change — the log folder and then the OS temp folder are tried in turn, and
+  the log line names wherever the file actually landed. Only if all three
+  fail does the line read `SNAPSHOT LOST`. Check for stray `.rescue_*.csv`
+  files after a run and fold them in by hand if needed.
 - **The scope app itself dies or gets restarted**: the next `clear_sweeps()`
-  call fails, the script logs `clear failed (...); reconnecting` and tries to
-  re-`connect()`. If reconnecting also fails, it logs that and keeps trying
-  on the following cycle — it does not exit.
+  fails, the script logs `clear sweeps failed - reattaching to the scope
+  application`, and reconnects. If reconnecting also fails it logs
+  `reconnect failed: ...` and tries again on the following cycle — it does
+  not exit. While the histograms are not being cleared the accumulation
+  clock keeps running, so `duration_s` still describes the real window.
+- **The COM link goes stale without any call failing.** A dead scope object
+  can keep answering calls while never yielding a histogram. After
+  `RECONNECT_AFTER_DEAD_CYCLES` consecutive snapshots in which *no* function
+  was available (3 by default), the logger reattaches on its own and logs
+  `consecutive snapshots with no histograms at all`. A single quiet function
+  does not trigger this — that is normal and shows up as `4/5 histograms`.
 - **The whole process crashes** (uncaught exception outside the main loop):
   the traceback is written to the log under `CRASHED:` and the process exits.
   There's no auto-restart built in — wrap the launch in a scheduled task or
   a supervisor script if you need one.
+- **A function reports impossible bin values** (negative or NaN populations,
+  which means it is not really configured as a histogram): those bins are
+  stored as zero and the log says so. They are not written through, because
+  a negative count cast to the file's `uint64` becomes 1.8e19 and would
+  carry a valid checksum.
 
 ## Stopping a run
 
-If you started it with a console, `Ctrl+C` in that window is enough.
+If you started it with a console, `Ctrl+C` in that window is enough; it logs
+`stopped by user (Ctrl+C)` and exits.
 
 A `pythonw` run has no console, so stop it by PID. Find the PID(s) first:
 
@@ -189,9 +206,10 @@ It reconnects, clears sweeps, and starts a fresh snapshot schedule from
 appending to the same day's/month's `.h5` file — nothing needs to be renamed
 or moved first.
 
-A stop-and-start is also the remedy when the COM link to the scope has gone
-stale, which the log shows as repeated `ClearSweeps.ActNow() failed` lines
-or as every snapshot recording `0/5 histograms`. Rows keep being written in
-that state, so the row count alone will not tell you anything is wrong —
-read the log. Restart the X-Stream application first if it is the thing that
-died, then `taskkill` the logger and start it again.
+The logger now reattaches to the scope on its own when the COM link dies, so
+a stale link is not by itself a reason to restart. It is still worth reading
+the log rather than trusting the row count: rows keep being written while
+the link is down, just with `0/5 histograms` and `available=False`. If the
+log shows `reconnect failed` cycle after cycle, the X-Stream application
+itself is gone — start that first, and the logger will pick it up at the
+next snapshot without being restarted.
