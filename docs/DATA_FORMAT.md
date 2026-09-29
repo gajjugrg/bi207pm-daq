@@ -16,7 +16,18 @@ every snapshot is a flushed append to an existing file, not a rewrite.
 | Path | Shape | Dtype | Meaning |
 |---|---|---|---|
 | `/timestamp` | `(N,)` | `S19` string `"YYYY-MM-DDTHH:MM:SS"` | End time of the accumulation for that row |
-| `/duration_s` | `(N,)` | `float64` | Seconds actually accumulated, clear→read (NaN if unknown). **Use this, not `INTERVAL_MINUTES`, to convert counts to a rate** — readout time makes the real interval longer than the nominal one. |
+| `/duration_s` | `(N,)` | `float64` | Seconds accumulated, from the clear to the *start* of that row's readout (NaN if unknown). **Use this, not `INTERVAL_MINUTES`, to convert counts to a rate** — readout time makes the real interval longer than the nominal one. |
+| `/read_s` | `(N,)` | `float64` | How long that row's readout itself took (NaN if unknown) |
+
+The functions are read one after another, so a given function accumulated
+somewhere between `duration_s` and `duration_s + read_s` seconds — `read_s`
+is there to bound that. It is normally a couple of seconds against an hour,
+but a function that is not triggering can push it to tens of seconds, and
+then the distinction starts to matter.
+
+Rows are always the same length across every dataset in the file. A column
+introduced after a file was started is back-filled with its fill value for
+the earlier rows rather than left short.
 
 File-level attributes (`hf.attrs`):
 - `format` — `"lecroy-histograms h5 v1"`
@@ -34,6 +45,18 @@ File-level attributes (`hf.attrs`):
 | `<F>/last_bin` | `(N,)` | `int32` | Last populated bin index |
 | `<F>/n_bins` | `(N,)` | `int32` | Length of the scope's `BinPopulations` that row |
 | `<F>/counts` | `(N, nBins)` | `uint64` | Full-axis bin populations, zero outside `[first_bin, last_bin]` |
+
+**Always mask on `available`.** A row exists for every snapshot attempt, and
+a function that was unavailable — or a snapshot interrupted partway through
+its append, e.g. by a `taskkill` — leaves a row of zeros behind. Those rows
+are indistinguishable from a genuinely empty histogram unless you check the
+flag. `first_bin = -1` and `bin_width = NaN` mark the same rows.
+
+Bin populations are counts, so `counts` is never negative by construction:
+the logger zeroes any negative or non-finite value the scope reports and
+logs a warning, rather than letting it wrap around to ~1.8e19 in the cast
+to `uint64`. If you see that warning, the function is not configured as a
+plain histogram and the row should not be trusted.
 
 **Bin centre convention:** `centre of bin j = offset + bin_width * (j + shift)`,
 with `shift = 0` (matches the old VBScript logger).
@@ -66,12 +89,15 @@ with h5py.File("2026_Sep_11.h5", "r") as hf:
 ## Rescue fallback (only on write failure)
 
 If an HDF5 append fails for any reason, that single snapshot is written
-instead as `<name>.rescue_HHMM.csv` next to the intended `.h5` file
+instead as `<name>.rescue_HHMM.csv` next to the intended `.h5` file. If that
+folder is itself the problem, the log folder and then the OS temp folder are
+tried; the log line names wherever the file actually landed.
 
 ```
 #lecroy-histograms v2
 #timestamp=<ISO timestamp>
 #interval_min=<INTERVAL_MINUTES>
+#duration_s=<seconds accumulated, or NAN>
 #columns=name,binWidth,offset,firstBin,lastBin,nBinsTotal,sum,counts...
 F1,<width>,<offset>,<first>,<last>,<nBinsTotal>,<sum>,<c0>,<c1>,...
 F2,unavailable
@@ -79,5 +105,11 @@ F2,unavailable
 ```
 
 One line per function; `unavailable` if that function had no valid histogram
-that snapshot. This is a fallback for a single bad snapshot, not a parallel
-recording format — check for stray `.rescue_*.csv` files after a run.
+that snapshot. Only the bins in `[firstBin, lastBin]` are listed, not the
+full axis, and `sum` is their total. `#duration_s` is the same quantity as
+`/duration_s` in the HDF5 file, so a rescued snapshot can be turned into a
+rate the same way as any other; older rescue files predate that header and
+only have the nominal `#interval_min`.
+
+This is a fallback for a single bad snapshot, not a parallel recording
+format — check for stray `.rescue_*.csv` files after a run.
