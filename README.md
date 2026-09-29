@@ -15,7 +15,8 @@ becomes one appended row in an HDF5 file instead of its own text file.
 |---|---|
 | `srcs/histogram_logger.py` | The logger itself. Run this on the scope PC. |
 | `tests/` | Tests for the storage and recovery logic. Run anywhere; no scope needed. |
-| `requirements.txt` | Python dependencies. |
+| `requirements.txt` | Pinned dependencies for Windows 11 / Python 3.10–3.13. |
+| `requirements-py38.txt` | Same, for Windows 7 / Python 3.8 scope PCs. |
 | `docs/SETUP.md` | First-time setup on a scope PC (Python, packages, scope link). |
 | `docs/RUNNING.md` | How to start, monitor, and stop a run; what a crash/restart does. |
 | `docs/DATA_FORMAT.md` | Full schema of the HDF5 files and the rescue CSV fallback. |

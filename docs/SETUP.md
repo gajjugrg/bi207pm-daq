@@ -17,12 +17,24 @@ the scope over a local COM/ActiveX connection
 
 ## 2. Install dependencies
 
+On a Windows 11 PC (Python 3.10–3.13):
+
 ```powershell
 pip install -r requirements.txt
 ```
 
-This installs `pywin32` (COM access to the scope app), `h5py` (HDF5 writer),
-and `numpy`.
+On a Windows 7 PC (Python 3.8):
+
+```powershell
+pip install -r requirements-py38.txt
+```
+
+Both install `pywin32` (COM access to the scope app), `h5py` (HDF5 writer),
+and `numpy`, at pinned versions. The split exists because Python 3.8 is the
+last release with a Windows 7 installer, and the current `h5py` and `numpy`
+no longer publish cp38 wheels. The versions are pinned so that every scope
+PC is provably running the same thing — bump them deliberately and re-run
+the tests, rather than letting each machine resolve its own.
 
 `pywin32` needs its post-install step run once per machine:
 
