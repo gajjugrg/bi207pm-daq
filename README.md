@@ -13,7 +13,7 @@ of its own text file.
 
 | File | Purpose |
 |---|---|
-| `histogram_logger.py` | The logger itself. Run this on the scope PC. |
+| `srcs/histogram_logger.py` | The logger itself. Run this on the scope PC. |
 | `requirements.txt` | Python dependencies. |
 | `docs/SETUP.md` | First-time setup on a scope PC (Python, packages, scope link). |
 | `docs/RUNNING.md` | How to start, monitor, and stop a run; what a crash/restart does. |
@@ -23,12 +23,28 @@ of its own text file.
 
 ```powershell
 pip install -r requirements.txt
-python histogram_logger.py
+python srcs/histogram_logger.py
 ```
 
 Histograms get written under `C:\Histograms\<year>_<month>\...h5` (or one
 file per month — see `docs/SETUP.md`), with status lines echoed to the console
 and appended to `C:\Histograms\logger.log`.
+
+## Day-to-day commands
+
+On the scope PCs the script is deployed to `C:\Scripts\histogram_logger.py`
+and run without a console, so these four commands cover a normal session.
+`docs/RUNNING.md` explains each one in full.
+
+| Task | Command |
+|---|---|
+| Start a run (returns immediately) | `pythonw C:\Scripts\histogram_logger.py` |
+| Check it is alive / find its PID | `tasklist /fi "imagename eq pythonw.exe"` |
+| Stop it (repeat `/pid` for several) | `taskkill /f /pid 13292` |
+| Read the status log | `type C:\Histograms\logger.log` |
+
+Check the log after starting: the `logger started (pid ...)` line confirms
+it came up, and tells you which PID to kill later.
 
 See `docs/RUNNING.md` for the full walkthrough and `docs/DATA_FORMAT.md` for
 how to read the data back out (e.g. with `h5py` / a companion `lecroy_hist.py`

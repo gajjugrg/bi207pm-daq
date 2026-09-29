@@ -28,8 +28,13 @@ file next to it (<name>.rescue_HHMM.csv) so nothing is lost.
 
 Requirements on the scope PC (Python 3.8 is the last version that runs on
 Windows 7):   pip install pywin32 h5py numpy
-Run in a console:      python histogram_logger.py
-Run with no console:   pythonw histogram_logger.py     (status goes to LOG_FILE only)
+
+Deployed to C:\\Scripts\\histogram_logger.py on the scope PCs; see docs/RUNNING.md.
+Start (no console):    pythonw C:\\Scripts\\histogram_logger.py   (status -> LOG_FILE only)
+Start (with console):  python  C:\\Scripts\\histogram_logger.py
+Find it / its pid:     tasklist /fi "imagename eq pythonw.exe"
+Stop it:               taskkill /f /pid <pid>                     (repeat /pid for several)
+Read the log:          type C:\\Histograms\\logger.log
 
 A console window can freeze the script: clicking in a Command Prompt with QuickEdit
 enabled blocks the process on its next write to stdout until a key is pressed. Running
