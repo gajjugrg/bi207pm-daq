@@ -67,6 +67,16 @@ separate config file:
 Edit these directly in the script before a run. Add `"F6"`, `"F7"`, `"F8"` to
 `FUNC_NAMES` if you have more histogram functions configured on the scope.
 
+Before the first run, from the `srcs` folder on the scope PC:
+
+```powershell
+py show_mapping.py
+```
+
+That prints one line per function — the equation or `operator(source)`, and
+the axis units — so you can confirm F1 really is the channel you think it is.
+The same strings are written into each HDF5 file as group attributes.
+
 ## 4. Sanity-check the scope link once
 
 The first `clear_sweeps()` call in a session checks that clearing the scope's
