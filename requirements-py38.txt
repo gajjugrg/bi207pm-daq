@@ -1,0 +1,8 @@
+# Windows 7 scope PCs, where Python 3.8 is the last version with an official
+# installer. These are the newest releases of each package that still ship
+# cp38 Windows wheels; anything later resolves to a source build or fails.
+#
+#     pip install -r requirements-py38.txt
+pywin32==306
+h5py==3.11.0
+numpy==1.24.4
