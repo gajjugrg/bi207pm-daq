@@ -13,7 +13,8 @@ The file layout is the one lecroy_hist.pack_hdf5() writes, so lecroy_hist.py
 (hdf5_histogram, to_th1) reads both:
 
     /timestamp        (N,)         "YYYY-MM-DDTHH:MM:SS"  (end of the accumulation)
-    /duration_s       (N,)         float64, seconds actually accumulated (clear -> read)
+    /duration_s       (N,)         float64, seconds accumulated (clear -> start of readout)
+    /read_s           (N,)         float64, how long that readout itself took
     /F1/counts        (N, nBins)   uint64, one gzip+shuffle chunk per row, fletcher32 checksum
     /F1/available     (N,)         bool
     /F1/bin_width     (N,)         float64   (NaN where unavailable)
@@ -24,7 +25,8 @@ The file layout is the one lecroy_hist.pack_hdf5() writes, so lecroy_hist.py
     centre of scope bin j = offset + bin_width*(j + shift), shift=0 as in the old logger
 
 If the HDF5 append fails for any reason, the snapshot is written as a v2 text
-file next to it (<name>.rescue_HHMM.csv) so nothing is lost.
+file next to it (<name>.rescue_HHMM.csv) so nothing is lost; if that folder is
+unwritable too, the log folder and the OS temp folder are tried in turn.
 
 Requirements on the scope PC (Python 3.8 is the last version that runs on
 Windows 7):   pip install pywin32 h5py numpy
@@ -43,6 +45,7 @@ under pythonw.exe (or with output redirected to a file) removes that failure mod
 import os
 import re
 import sys
+import tempfile
 import time
 from datetime import datetime, timedelta
 
@@ -60,9 +63,13 @@ POLL_MAX_TRIES = 40                                    # 40 x 0.5 s = 20 s max w
 GZIP_LEVEL = 6
 LOG_FILE = r"C:\Histograms\logger.log"   # every status line is appended here as well
 MAX_LOG_MB = 5                              # rolled to <name>.1 past this size
+CONNECT_RETRIES = 6                         # startup only: the scope app may still be booting
+CONNECT_RETRY_S = 10.0
+RECONNECT_AFTER_DEAD_CYCLES = 3             # snapshots with no histograms at all before reattaching
 
 MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-scope = None   # set by connect()
+scope = None       # set by connect()
+_verified = False  # has the "clearing really clears" check run against this scope object?
 
 
 def say(msg: str) -> None:
@@ -92,12 +99,28 @@ def say(msg: str) -> None:
 
 
 # ---------------- scope access ----------------
-def connect():
-    """Attach to the running scope application (same COM object the VBScript used)."""
-    global scope
+def connect(retries: int = 0, delay_s: float = CONNECT_RETRY_S):
+    """Attach to the running scope application (same COM object the VBScript used).
+
+    `retries` is for startup: launched from a scheduled task at boot, this can win
+    the race against the X-Stream application and would otherwise die immediately.
+    Mid-run reconnects pass 0 and let the main loop try again on the next cycle.
+    """
+    global scope, _verified
     import win32com.client
-    scope = win32com.client.Dispatch("LeCroy.XStreamDSO")
-    return scope
+    for attempt in range(retries + 1):
+        try:
+            scope = win32com.client.Dispatch("LeCroy.XStreamDSO")
+            # a fresh COM object may be a different firmware/app instance, so the
+            # "clearing really clears" check has to run again against it
+            _verified = False
+            return scope
+        except Exception:  # noqa: BLE001 - retried below, re-raised on the last attempt
+            if attempt == retries:
+                raise
+            say(f"connect failed (attempt {attempt + 1}/{retries + 1}); "
+                f"retrying in {delay_s:.0f}s")
+            time.sleep(delay_s)
 
 
 def _sweep_count():
@@ -109,9 +132,6 @@ def _sweep_count():
         except Exception:  # noqa: BLE001
             continue
     return None
-
-
-_verified = False
 
 
 def clear_sweeps() -> str:
@@ -153,15 +173,29 @@ def num(x) -> float:
 
 
 def poll_histogram(name):
-    """Result object of math function `name`, or None if not ready within the timeout."""
+    """Result object of math function `name`, or None if not ready within the timeout.
+
+    The fast test is LastPopulatedBin > FirstPopulatedBin, which costs two scalar
+    COM reads. A histogram with exactly one populated bin never satisfies it, so
+    rather than throw such a snapshot away we pay for one full BinPopulations read
+    once the timeout expires and accept the function if anything landed in it at
+    all. Low-rate channels early in a run sit in exactly that state.
+    """
+    h = None
     for _ in range(POLL_MAX_TRIES):
         try:
             h = scope.Math.Functions(name).Out.Result
             if num(h.LastPopulatedBin) > num(h.FirstPopulatedBin):
                 return h
         except Exception:  # noqa: BLE001 - function off / not a histogram yet
-            pass
+            h = None
         time.sleep(POLL_SLEEP_S)
+    if h is not None:
+        try:
+            if np.asarray(h.BinPopulations, dtype=float).sum() > 0:
+                return h
+        except Exception:  # noqa: BLE001
+            pass
     return None
 
 
@@ -177,17 +211,37 @@ def read_histogram(name):
         _last_read_times[name] = time.time() - t0
 
 
+def _sanitise(counts: np.ndarray, name: str) -> np.ndarray:
+    """Zero out NaN/inf and negative bins before they can be cast to uint64.
+
+    A -1.0 cast straight to uint64 becomes 1.8e19 and carries a perfectly valid
+    fletcher32 checksum, so nothing downstream would ever flag it. Bin populations
+    are counts and cannot legitimately be negative; if they are, the function is
+    not configured as a plain histogram and the value is not trustworthy anyway.
+    """
+    bad = ~np.isfinite(counts)
+    if bad.any():
+        counts = np.where(bad, 0.0, counts)
+    neg = counts < 0
+    if neg.any():
+        counts = np.where(neg, 0.0, counts)
+    if bad.any() or neg.any():
+        say(f"WARNING: {name} returned {int(bad.sum())} non-finite and {int(neg.sum())} "
+            "negative bin(s); stored as 0 - is it really configured as a histogram?")
+    return counts
+
+
 def _read_histogram(name):
     h = poll_histogram(name)
     if h is None:
         return None
-    counts = np.asarray(h.BinPopulations, dtype=float).ravel()
+    counts = _sanitise(np.asarray(h.BinPopulations, dtype=float).ravel(), name)
     if counts.size == 0:
         return None
     first = max(int(num(h.FirstPopulatedBin)), 0)
     last = min(int(num(h.LastPopulatedBin)), counts.size - 1)
     width, offset = num(h.BinWidth), num(h.OffsetAtLeftEdge)
-    if width == 0 or last <= first:
+    if width == 0 or last < first:          # last == first is a single populated bin, which is valid
         return None
     return dict(width=width, offset=offset, first=first, last=last, counts=counts)
 
@@ -210,8 +264,23 @@ def _grow(ds, n):
     ds.resize(n, axis=0)
 
 
+def _column(parent, key, dtype, fill, n_rows):
+    """1-D dataset `key`, created already n_rows long if the file does not have it.
+
+    Creating it at the current row count keeps every column aligned with /timestamp
+    even in a file written by a version that did not have this column yet; the
+    back-filled rows read as the fill value, which is what "unknown" means for all
+    of them. Keying every column off one sentinel instead would leave the missing
+    ones permanently shorter than /timestamp.
+    """
+    if key not in parent:
+        return parent.create_dataset(key, shape=(n_rows,), maxshape=(None,), dtype=dtype,
+                                     chunks=(24,), fillvalue=fill)
+    return parent[key]
+
+
 def append_snapshot(path: str, timestamp: str, results: dict,
-                    duration_s: float = float("nan")) -> int:
+                    duration_s: float = float("nan"), read_s: float = float("nan")) -> int:
     """Append one snapshot (dict name -> read_histogram() result) as a row. Returns the row index."""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with h5py.File(path, "a") as hf:
@@ -220,26 +289,21 @@ def append_snapshot(path: str, timestamp: str, results: dict,
             hf.attrs["bin_center"] = "offset + bin_width*(j+shift); shift=0 is the old logger convention"
             hf.attrs["interval_min"] = INTERVAL_MINUTES
             hf.create_dataset("timestamp", shape=(0,), maxshape=(None,), dtype="S19", chunks=(24,))
-            # seconds actually accumulated (clear -> read). Divide counts by this for a rate:
-            # the wall-clock interval is only nominal, readout time makes the real one longer.
-            hf.create_dataset("duration_s", shape=(0,), maxshape=(None,), dtype="f8", chunks=(24,),
-                              fillvalue=np.nan)
         i = hf["timestamp"].shape[0]
         _grow(hf["timestamp"], i + 1)
         hf["timestamp"][i] = timestamp.encode()
-        if "duration_s" in hf:
-            _grow(hf["duration_s"], i + 1)
-            hf["duration_s"][i] = duration_s
+        # duration_s is clear -> start of readout, read_s is the readout itself. Divide
+        # counts by duration_s for a rate: the wall-clock interval is only nominal.
+        for key, value in (("duration_s", duration_s), ("read_s", read_s)):
+            ds = _column(hf, key, "f8", np.nan, i)
+            _grow(ds, i + 1)
+            ds[i] = value
 
         for name in FUNC_NAMES:
             r = results.get(name)
             g = hf.require_group(name)
-            if "available" not in g:
-                for key, dtype, fill in _SCALARS:
-                    g.create_dataset(key, shape=(0,), maxshape=(None,), dtype=dtype, chunks=(24,),
-                                     fillvalue=fill)
-            for key, _, _ in _SCALARS:
-                _grow(g[key], i + 1)
+            for key, dtype, fill in _SCALARS:
+                _grow(_column(g, key, dtype, fill, i), i + 1)
             if r is None:
                 g["available"][i] = False
                 continue
@@ -272,8 +336,13 @@ def _vb(x: float) -> str:
     return str(int(x)) if float(x).is_integer() and abs(x) < 1e15 else "%.15G" % x
 
 
-def write_rescue_text(path: str, timestamp: str, results: dict) -> None:
+def write_rescue_text(path: str, timestamp: str, results: dict,
+                      duration_s: float = float("nan")) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    # duration_s matters as much here as in the HDF5 file - it is what a rate is
+    # computed from - so the rescued snapshot has to carry it too
     lines = ["#lecroy-histograms v2", f"#timestamp={timestamp}", f"#interval_min={INTERVAL_MINUTES}",
+             f"#duration_s={_vb(duration_s)}",
              "#columns=name,binWidth,offset,firstBin,lastBin,nBinsTotal,sum,counts..."]
     for name in FUNC_NAMES:
         r = results.get(name)
@@ -287,10 +356,39 @@ def write_rescue_text(path: str, timestamp: str, results: dict) -> None:
         f.write("\r\n".join(lines) + "\r\n")
 
 
+def _rescue(path: str, now: datetime, timestamp: str, results: dict,
+            duration_s: float, err: Exception) -> str:
+    """Dump a snapshot whose HDF5 append failed to text. Returns a status line.
+
+    The usual reason an append fails is that its own folder cannot be written to
+    (new month folder, permissions, full disk), which is exactly the case where
+    writing the rescue file beside it fails as well - so fall back to the log
+    folder and then the temp folder before declaring the snapshot lost.
+    """
+    stem = (path[:-3] if path.endswith(".h5") else path) + f".rescue_{now:%H%M}.csv"
+    leaf = os.path.basename(stem)
+    candidates = [stem,
+                  os.path.join(os.path.dirname(LOG_FILE) or ".", leaf),
+                  os.path.join(tempfile.gettempdir(), leaf)]
+    last = None
+    for candidate in candidates:
+        try:
+            write_rescue_text(candidate, timestamp, results, duration_s)
+            return f"HDF5 append FAILED ({err}); snapshot saved as {candidate}"
+        except Exception as e:  # noqa: BLE001 - try the next location
+            last = e
+    return f"SNAPSHOT LOST: HDF5 append failed ({err}) and every rescue location failed ({last})"
+
+
 # ---------------- main loop ----------------
-def log_once(now: datetime, duration_s: float = float("nan")) -> str:
-    """Read all functions once and store them. Returns a one-line status."""
+def log_once(now: datetime, duration_s: float = float("nan")):
+    """Read all functions once and store them. Returns (status line, functions read).
+
+    The count is what the main loop watches to notice a dead COM link: a stale
+    scope object still answers every call, it just never yields a histogram.
+    """
     t0 = time.time()
+    _last_read_times.clear()
     results = {name: read_histogram(name) for name in FUNC_NAMES}
     read_s = time.time() - t0
     n_ok = sum(r is not None for r in results.values())
@@ -301,16 +399,46 @@ def log_once(now: datetime, duration_s: float = float("nan")) -> str:
     slow = ", ".join(f"{n} {t:.0f}s" for n, t in _last_read_times.items() if t > 1.0)
     detail = f"read {read_s:.1f}s" + (f" [slow: {slow}]" if slow else "")
     try:
-        row = append_snapshot(path, timestamp, results, duration_s)
-        return f"{path} row {row}  ({n_ok}/{len(FUNC_NAMES)} histograms, {detail})"
+        row = append_snapshot(path, timestamp, results, duration_s, read_s)
+        return f"{path} row {row}  ({n_ok}/{len(FUNC_NAMES)} histograms, {detail})", n_ok
     except Exception as e:  # noqa: BLE001
-        rescue = path[:-3] + f".rescue_{now:%H%M}.csv"
-        write_rescue_text(rescue, timestamp, results)
-        return f"HDF5 append FAILED ({e}); snapshot saved as {rescue}"
+        return _rescue(path, now, timestamp, results, duration_s, e), n_ok
+
+
+def maintain_link(cleared: bool, n_ok: int, dead_cycles: int):
+    """Reattach to the scope application when the COM link looks dead.
+
+    Returns (histograms are known to have been cleared, consecutive dead cycles).
+
+    clear_sweeps() reports failure by returning "" rather than raising, so this
+    has to be driven by its return value; watching for an exception instead means
+    never reconnecting at all. A failed clear is acted on at once, since the scope
+    application restarting is the likely cause. A readout where nothing at all was
+    available is only suspicious after RECONNECT_AFTER_DEAD_CYCLES in a row: one
+    function that is not triggering is normal, all of them never being ready is
+    what a stale COM object looks like from the outside.
+    """
+    if cleared and n_ok > 0:
+        return True, 0
+    if cleared:
+        dead_cycles += 1
+        if dead_cycles < RECONNECT_AFTER_DEAD_CYCLES:
+            return True, dead_cycles
+        say(f"{dead_cycles} consecutive snapshots with no histograms at all - "
+            "reattaching to the scope application")
+    else:
+        say("clear sweeps failed - reattaching to the scope application")
+    try:
+        connect()
+    except Exception as e:  # noqa: BLE001 - the next cycle tries again
+        say(f"reconnect failed: {e}; will retry next cycle")
+        return cleared, dead_cycles
+    say("reconnected to the scope application")
+    return bool(clear_sweeps()), 0
 
 
 def main() -> None:
-    connect()
+    connect(retries=CONNECT_RETRIES)
     os.makedirs(BASE_FOLDER, exist_ok=True)
     say(f"logger started (pid {os.getpid()}, interval={INTERVAL_MINUTES} min, "
         f"{len(FUNC_NAMES)} functions, one file per {FILE_PERIOD})")
@@ -329,29 +457,29 @@ def main() -> None:
     else:
         next_run = cleared_at + step
 
+    dead_cycles = 0
     while True:
         wait = (next_run - datetime.now()).total_seconds()
         if wait > 0:
             time.sleep(wait)
         now = datetime.now()
         duration = (now - cleared_at).total_seconds()      # true accumulation time
+        n_ok = 0
         try:
-            say(log_once(now, duration))
+            status, n_ok = log_once(now, duration)
+            say(status)
         except Exception as e:  # noqa: BLE001 - keep logging; the next cycle may succeed
             say(f"SNAPSHOT LOST: {e}")
-        try:
-            clear_sweeps()
-        except Exception as e:  # noqa: BLE001 - scope app restarted? try to reattach
-            say(f"clear failed ({e}); reconnecting")
-            try:
-                connect()
-            except Exception as e2:  # noqa: BLE001
-                say(f"reconnect failed: {e2}")
-        cleared_at = datetime.now()
+
+        cleared, dead_cycles = maintain_link(bool(clear_sweeps()), n_ok, dead_cycles)
+        # only restart the clock when the histograms really were reset: if they were
+        # not, they keep accumulating from the old mark and duration_s must say so
+        if cleared:
+            cleared_at = datetime.now()
 
         next_run += step
-        if next_run <= cleared_at:                          # readout overran the interval
-            missed = int((cleared_at - next_run) / step) + 1
+        if next_run <= datetime.now():                      # readout overran the interval
+            missed = int((datetime.now() - next_run) / step) + 1
             next_run += missed * step
             say(f"  (readout took {duration:.0f}s, longer than the interval - "
                 f"skipping {missed} slot(s); consider a larger INTERVAL_MINUTES)")
@@ -360,6 +488,8 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
+    except KeyboardInterrupt:          # the documented way to stop a console run
+        say("stopped by user (Ctrl+C)")
     except Exception:
         import traceback
         say("CRASHED:\n" + traceback.format_exc())
