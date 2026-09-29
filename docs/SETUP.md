@@ -48,6 +48,9 @@ separate config file:
 | `GZIP_LEVEL` | HDF5 gzip compression level for histogram counts | `6` |
 | `LOG_FILE` | Where status lines get appended | `C:\Histograms\logger.log` |
 | `MAX_LOG_MB` | Log gets rolled to `<name>.1` past this size | `5` |
+| `CONNECT_RETRIES` | Startup only: how many times to retry attaching to the scope app, for when the logger is launched at boot and wins the race against it | `6` |
+| `CONNECT_RETRY_S` | Seconds between those startup attempts | `10` |
+| `RECONNECT_AFTER_DEAD_CYCLES` | Consecutive snapshots with *no* function available before the logger decides the COM link is stale and reattaches | `3` |
 
 Edit these directly in the script before a run. Add `"F6"`, `"F7"`, `"F8"` to
 `FUNC_NAMES` if you have more histogram functions configured on the scope.
@@ -64,7 +67,21 @@ WARNING: sweeps did not drop (... -> ...) - the histograms may not be
 resetting, so snapshots would accumulate.
 ```
 
-stop and check the scope firmware / COM binding before trusting a run. This
-check only runs once per process start.
+stop and check the scope firmware / COM binding before trusting a run. The
+check runs once per connection — at startup, and again after any mid-run
+reconnect, since a fresh COM object may be a different application instance.
+
+## 5. Run the tests (optional, and not on the scope PC)
+
+`tests/` covers everything below the COM boundary against a stub scope, so
+it runs on any machine with `h5py` and `numpy` and needs neither Windows nor
+an instrument:
+
+```bash
+python -m unittest discover -s tests
+```
+
+Worth running after any edit to the storage or recovery logic — that code
+is otherwise only exercised on a scope PC that is busy taking data.
 
 Next: `RUNNING.md` for how to actually start and monitor a run.

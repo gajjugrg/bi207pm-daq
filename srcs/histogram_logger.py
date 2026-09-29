@@ -3,8 +3,8 @@
 histogram_logger.py - LeCroy X-Stream histogram logger that writes HDF5 directly.
 
 Same job as histogram_logger.vbs (clear sweeps, wait INTERVAL_MINUTES, read the
-histograms in F1..F6), but each snapshot is appended as one row to an HDF5
-file instead of becoming its own text file:
+histogram functions in FUNC_NAMES), but each snapshot is appended as one row to
+an HDF5 file instead of becoming its own text file:
 
     FILE_PERIOD = "day"    ->  C:\\Histograms\\2026_Sep\\2026_Sep_06.h5   (24 rows)
     FILE_PERIOD = "month"  ->  C:\\Histograms\\2026_Sep.h5              (~720 rows)

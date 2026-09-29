@@ -5,15 +5,16 @@ the LeCroy X-Stream oscilloscope into structured HDF5 files, on a fixed timing
 grid, with automatic rescue-to-CSV if a write ever fails.
 
 This replaces the older `histogram_logger.vbs` text-file logger. Same
-acquisition logic (clear sweeps → wait `INTERVAL_MINUTES` → read histograms in
-`F1..F6`), but each snapshot becomes one appended row in an HDF5 file instead
-of its own text file.
+acquisition logic (clear sweeps → wait `INTERVAL_MINUTES` → read the histogram
+functions listed in `FUNC_NAMES`, `F1`–`F5` by default), but each snapshot
+becomes one appended row in an HDF5 file instead of its own text file.
 
 ## Repo contents
 
 | File | Purpose |
 |---|---|
 | `srcs/histogram_logger.py` | The logger itself. Run this on the scope PC. |
+| `tests/` | Tests for the storage and recovery logic. Run anywhere; no scope needed. |
 | `requirements.txt` | Python dependencies. |
 | `docs/SETUP.md` | First-time setup on a scope PC (Python, packages, scope link). |
 | `docs/RUNNING.md` | How to start, monitor, and stop a run; what a crash/restart does. |
